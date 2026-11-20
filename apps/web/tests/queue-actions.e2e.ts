@@ -30,6 +30,8 @@ const SENDING_EXPECTED = join(SNAPSHOT_DIR, 'sending.expected.md')
 const WRITER_HELD_EXPECTED = join(SNAPSHOT_DIR, 'writer-held.expected.md')
 const FAILED_EXPECTED = join(SNAPSHOT_DIR, 'failed.expected.md')
 const GOAL_STOP_EXPECTED = join(SNAPSHOT_DIR, 'goal-stop.expected.md')
+const INTERRUPT_MENU_EXPECTED = join(SNAPSHOT_DIR, 'interrupt-menu.expected.md')
+const INTERRUPT_SETTLED_EXPECTED = join(SNAPSHOT_DIR, 'interrupt-settled.expected.md')
 const MODE = webSnapshotMode()
 
 const ACTIVE_PROMPT = 'Reply with a one-sentence description of event sourcing, then stop.'
@@ -80,6 +82,70 @@ describe('web e2e: queue row actions', () => {
     await expect.poll(() => row.getByRole('button', { name: 'Edit queued message' }).isEnabled()).toBe(true)
     await expect.poll(() => row.getByRole('button', { name: 'Remove queued message' }).isEnabled()).toBe(true)
   }
+
+  it.skipIf(MODE === 'record')('interrupts an active turn and delivers the correction before the existing queue', async () => {
+    overrideDir = await mkdtemp(join(tmpdir(), 'dsh-web-interrupt-and-send-'))
+    const readyFile = join(overrideDir, '.hang-ready')
+    const overridePath = join(overrideDir, 'replay.override.json')
+    const recorded = deriveReplayScript(parseSessionLog(await readFile(FIXTURE, 'utf8')))
+    expect(recorded).toHaveLength(1)
+    const replay: ReplayEntry[] = [{ kind: 'hang', readyFile }, recorded[0]!, recorded[0]!]
+    await writeFile(overridePath, JSON.stringify(replay))
+
+    const sessionEvents: SessionEvent[] = []
+    scaffold = await launchWebScaffold({ replayFixture: FIXTURE, replayOverride: overridePath, compareReplaySession: false })
+    scaffold.ctx.on('session/event', (_session, event) => { sessionEvents.push(event) })
+    browser = await chromium.launch()
+    page = await newEnglishPage(browser)
+    const tripwire = watchConsole(page)
+    onTestFailed(() => saveFailureShot(page, 'web-e2e-interrupt-and-send'))
+    await page.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
+    await connectFreshWorkspace(page, scaffold.workspaceCwd)
+
+    const input = page.locator('[data-composer-input]').first()
+    await input.fill(ACTIVE_PROMPT)
+    await input.press('Enter')
+    await expect.poll(() => existsSync(readyFile), { timeout: 15_000 }).toBe(true)
+    await input.fill(TAIL)
+    const queued = page.waitForResponse('**/api/session/prompt')
+    await input.press('Enter')
+    expect((await queued).ok()).toBe(true)
+
+    const correction = 'Use the corrected instructions first.'
+    await input.fill(correction)
+    const options = page.getByRole('button', { name: 'Message delivery options', exact: true })
+    await options.click()
+    const action = page.getByRole('menuitem', { name: 'Interrupt and send', exact: true })
+    await action.waitFor({ state: 'visible' })
+    await compareOrRefreshGolden(INTERRUPT_MENU_EXPECTED, await page.getByRole('menu').ariaSnapshot(), MODE)
+    await page.keyboard.press('Escape')
+    await action.waitFor({ state: 'hidden' })
+    await options.click()
+    const admitted = page.waitForResponse('**/api/session/prompt')
+    await action.click()
+    const response = await admitted
+    expect(response.ok()).toBe(true)
+    expect(await response.json()).toMatchObject({ result: { ok: true, value: { accepted: true } } })
+    const request: unknown = response.request().postDataJSON()
+
+    await expect.poll(() => turnEndReasons(sessionEvents), { timeout: 15_000 }).toEqual(['aborted', 'completed', 'completed'])
+    const accepted = sessionEvents.flatMap(event => event.type === 'agent/inbox/spliced' && event.data.target === 'next-turn'
+      ? event.data.inserted.filter(message => message.content.some(block => block.type === 'text' && block.text === correction))
+      : [])
+    expect(accepted).toHaveLength(1)
+    const users = sessionEvents.flatMap(event => event.type === 'user/message' && event.data.source.kind === 'user' ? [event] : [])
+    expect(users.map(event => event.data.content)).toEqual([ACTIVE_PROMPT, correction, TAIL].map(text => [{ type: 'text', text }]))
+    expect(users[1]?.data).toEqual(accepted[0])
+    const source = users[1]?.data.source
+    expect(source).toMatchObject({ kind: 'user', rpcId: expect.any(String) })
+    if (source?.kind !== 'user' || !('rpcId' in source)) throw new Error('correction is missing its request identity')
+    expect(request).toMatchObject({ payload: { args: { request: { mode: 'interrupt', requestId: source.rpcId } } } })
+    await page.getByText(correction, { exact: true }).waitFor({ state: 'visible' })
+    const snapshot = await captureStableAria(page, '[class*="centerCol"]', scaffold.workspaceCwd)
+    await compareOrRefreshGolden(INTERRUPT_SETTLED_EXPECTED, snapshot, MODE)
+    expect(tripwire.pageErrors).toEqual([])
+    expect(tripwire.warnings).toEqual([])
+  })
 
   it.skipIf(MODE === 'record').each(['button', 'keyboard'] as const)('edits and removes exact occurrences and preserves Queue across %s stop', async (method) => {
     overrideDir = await mkdtemp(join(tmpdir(), 'dsh-web-queue-actions-'))
@@ -496,7 +562,7 @@ describe('web e2e: queue row actions', () => {
         'collapsed.expected.md', 'editing.expected.md', 'layout.expected.md',
         'preserved.expected.md', 'preserved-expanded.expected.md', 'ui.expected.md',
         'sending.expected.md', 'failed.expected.md', 'writer-held.expected.md',
-        'goal-stop.expected.md',
+        'goal-stop.expected.md', 'interrupt-menu.expected.md', 'interrupt-settled.expected.md',
       ],
     )
   })

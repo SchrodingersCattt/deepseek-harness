@@ -49,6 +49,7 @@ async function uploadHarness(origin?: 'subagent'): Promise<{
     status: 'idle',
     ctx: undefined,
     steer: vi.fn(),
+    interruptAndSend: vi.fn<NonNullable<Agent['interruptAndSend']>>(),
     followup,
     cancel: vi.fn(),
   } as unknown as Agent
@@ -349,6 +350,41 @@ describe('Session file uploads', () => {
     agent.inbox.append('next-turn', followup.mock.calls[0]?.[0] as UserMessage)
     await expect(controller.prompt(request)).resolves.toEqual({ accepted: true })
     expect(followup).toHaveBeenCalledOnce()
+  })
+
+  it('joins concurrent and later retries of the same interrupt request', async () => {
+    const { controller, agent, followup } = await uploadHarness()
+    const admission = Promise.withResolvers<Awaited<ReturnType<NonNullable<Agent['interruptAndSend']>>>>()
+    if (agent.interruptAndSend === undefined) throw new Error('fixture is missing an interrupt handler')
+    const interrupt = vi.mocked(agent.interruptAndSend).mockReturnValue(admission.promise)
+    const request = { ...promptRequest([{ type: 'text', text: '  correction\nexactly as typed  ' }]), mode: 'interrupt' as const }
+
+    const first = controller.prompt(request)
+    const retry = controller.prompt(request)
+    await vi.waitFor(() => expect(interrupt).toHaveBeenCalledOnce())
+    expect(interrupt.mock.calls[0]?.[0]).toMatchObject({
+      content: request.content,
+      source: { kind: 'user', rpcId: request.requestId },
+    })
+    admission.resolve({ kind: 'accepted' })
+    await expect(Promise.all([first, retry, controller.prompt(request)])).resolves.toEqual([
+      { accepted: true }, { accepted: true }, { accepted: true },
+    ])
+    expect(interrupt).toHaveBeenCalledOnce()
+    expect(followup).not.toHaveBeenCalled()
+  })
+
+  it('reports a failed correction save and permits a retry', async () => {
+    const { controller, agent } = await uploadHarness()
+    if (agent.interruptAndSend === undefined) throw new Error('fixture is missing an interrupt handler')
+    const interrupt = vi.mocked(agent.interruptAndSend)
+      .mockResolvedValueOnce({ kind: 'save-failed', cause: new Error('disk unavailable') })
+      .mockResolvedValueOnce({ kind: 'accepted' })
+    const request = { ...promptRequest([{ type: 'text', text: 'corrected' }]), mode: 'interrupt' as const }
+
+    await expect(controller.prompt(request)).rejects.toMatchObject({ code: 'session/interrupt-save-failed' })
+    await expect(controller.prompt(request)).resolves.toEqual({ accepted: true })
+    expect(interrupt).toHaveBeenCalledTimes(2)
   })
 
   it('deduplicates a retried rpcId already present in the durable log', async () => {

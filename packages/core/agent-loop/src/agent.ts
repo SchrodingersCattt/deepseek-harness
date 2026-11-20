@@ -12,11 +12,13 @@ import type {
   AgentStatus,
   CancelOptions,
   InboxTarget,
+  InterruptAndSendResult,
   PreStepDecision,
   RequestErrorAction,
 } from '@deepseek-ai/dsh-agent'
 import { agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions, LlmCallConfig, Message, PreparedLlmCall } from '@deepseek-ai/dsh-llm'
+import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
 import {
   LlmError,
   createAssistantMessage,
@@ -99,6 +101,8 @@ export class ReactLoopAgent implements Agent {
   readonly inbox: ReactLoopInbox
   private phase: Phase
   private activityDone: Promise<void> = Promise.resolve()
+  private interruptAdmission: Promise<void> | undefined
+  private pendingCorrection: MessageId | undefined
 
   /** The agent-scoped registration boundary; the lifecycle owner unwinds it after the driver exits. */
   readonly scope: Scope
@@ -162,6 +166,37 @@ export class ReactLoopAgent implements Agent {
 
   followup(input: UserMessage): void {
     this.send(input, 'next-turn', true)
+  }
+
+  async interruptAndSend(message: UserMessage): Promise<InterruptAndSendResult> {
+    if (this.interruptAdmission !== undefined
+      || this.inbox.nextTurn.some(pending => pending.id === this.pendingCorrection)) {
+      return { kind: 'busy' }
+    }
+    const interrupted = this.phase.kind === 'running' ? this.phase.abort : undefined
+    const admission = Promise.withResolvers<void>()
+    this.interruptAdmission = admission.promise
+    try {
+      this.inbox.prepend('next-turn', message)
+      try {
+        if (!await this.loopCtx.sessions.flush(this.session)) {
+          throw new Error('interrupt and send requires a session persistence writer')
+        }
+      } catch (cause: unknown) {
+        this.inbox.remove(message.id)
+        return { kind: 'save-failed', cause }
+      }
+      this.pendingCorrection = message.id
+      if (!this.inbox.nextTurn.some(pending => pending.id === message.id)) return { kind: 'accepted' }
+      if (this.phase.kind === 'running' && this.phase.abort === interrupted) {
+        this.cancel({ kind: 'user' }, { keepInbox: true })
+      }
+      this.wakeDriver(this.phase.kind === 'running' && this.phase.abort.signal.aborted)
+      return { kind: 'accepted' }
+    } finally {
+      this.interruptAdmission = undefined
+      admission.resolve()
+    }
   }
 
   steer(input: UserMessage): void {
@@ -251,7 +286,12 @@ export class ReactLoopAgent implements Agent {
 
   private async kick(): Promise<void> {
     try {
-      while (await this.turn()) {}
+      do {
+        while (this.interruptAdmission !== undefined) {
+          await this.interruptAdmission
+          if (!this.inbox.hasPending) return
+        }
+      } while (await this.turn())
     } catch (_error) {
       // Reported failures and cancellation are contained at the driver boundary.
     } finally {

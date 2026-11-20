@@ -24,7 +24,7 @@ export interface ProductEventMap {
     model_name?: string
     thinking_effort?: string
     run_mode: 'plan' | 'goal' | 'default'
-    msg_type: 'default' | 'steer' | 'queue'
+    msg_type: 'default' | 'steer' | 'queue' | 'interrupt'
   }
   model_switch: { session_id?: SessionId; switch_from: string; switch_to: string }
   thinking_level_switch: { session_id?: SessionId; switch_from: string; switch_to: string; model_name: string }

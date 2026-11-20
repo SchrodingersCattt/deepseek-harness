@@ -348,7 +348,9 @@ export class SessionInputShell implements SessionInput {
     const submission: MessageSubmission = Object.freeze({
       timestamp, mode, ...source === undefined ? {} : { source }, ...state === undefined ? {} : { state },
     })
-    if (this.snapshot.draft.trim() === '' && this.attachmentIds.length > 0) {
+    const hasText = this.snapshot.draft.trim() !== ''
+    if (!hasText && this.attachmentIds.length === 0 && mode === 'interrupt') return
+    if (mode !== 'interrupt' && !hasText && this.attachmentIds.length > 0) {
       if (this.snapshot.phase === 'plain') {
         const attachmentIds = [...this.attachmentIds]
         const controller = new AbortController()
@@ -767,9 +769,11 @@ export class SessionInputShell implements SessionInput {
     if (record === undefined) return
     this.detachedDrafts.delete(attempt.seq)
     this.restoreAttachments(record.attachmentIds)
-    this.failedDetached.set(attempt.seq, record)
-    if (this.projection.clipboardText === '' || this.failedRestoreRev === this.rev) {
-      this.restoreFailedDrafts()
+    if (attempt.mode !== 'interrupt') {
+      this.failedDetached.set(attempt.seq, record)
+      if (this.projection.clipboardText === '' || this.failedRestoreRev === this.rev) {
+        this.restoreFailedDrafts()
+      }
     }
     this.dispatchRun(({ type: 'sink-settled', attempt, ok: false, ...(message === undefined ? {} : { message }) }))
   }

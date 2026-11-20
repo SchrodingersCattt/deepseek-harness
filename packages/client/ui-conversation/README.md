@@ -86,6 +86,8 @@ The resident composer survives no-Session and Session transitions. Whitespace hi
 
 Plain Enter uses the configured delivery mode, exactly Ctrl+Enter or Cmd+Enter uses its complement, and Shift+Enter inserts a line break. Enter with Alt, AltGraph, both Ctrl and Cmd, or Shift plus Ctrl/Cmd leaves the draft and command menu unchanged and keeps the DOM event available to application shortcuts. The Conversation plugin registers the fixed send, newline, complementary-delivery, command-menu, and reference-menu rows and reserves their bindings until it unloads.
 
+In a running ordinary Session, open Message delivery options next to Send to choose Queue, Steer, or Interrupt and Send. The composer holds the correction draft until the Host confirms the save and shows when cancellation is in progress. Changes already made by tools remain in the workspace.
+
 Clicking unused space inside an editable composer preserves its current caret or selection when focused, or restores its previous caret or selection when unfocused. Text selection, scrollbars, controls, and embedded overlays keep their own pointer behavior.
 
 Each composer attempt carries its original occurrence time, gesture, delivery intent, and Session model/run-state snapshot through asynchronous command arbitration. The ordinary-message notification fires once before reference serialization, including attachment-only submissions; handled or claimed commands do not notify. Snapshot and notification failures cannot block sending.

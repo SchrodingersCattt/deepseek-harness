@@ -26,6 +26,7 @@ import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SubmitOutcome } from '../src/client/contract/input.ts'
+import type { InputSubmitMode } from '../src/client/contract/composer-submission.ts'
 import { SessionInputShell } from '../src/client/input/facade.ts'
 import { $replaceDetectSpanWithText, $selectDetectSpan } from '../src/client/input/editor/span-map.ts'
 import type {
@@ -124,7 +125,7 @@ function bench(over?: BenchOptions) {
   const sink = vi.fn<(
     text: string,
     attachmentIds: readonly DraftAttachmentId[],
-    mode: 'queue' | 'steer',
+    mode: InputSubmitMode,
     signal: AbortSignal,
   ) => Promise<SubmitOutcome>>(() => Promise.resolve({ kind: 'success' }))
   const lex = over?.lexicon
@@ -1042,6 +1043,45 @@ describe('running and lock semantics', () => {
     expect(button.getAttribute('aria-label')).toBe('插话发送')
     fireEvent.click(button)
     expect(sink).toHaveBeenCalledWith('按钮插话', [], 'steer', expect.any(AbortSignal))
+  })
+
+  it.each([
+    ['排队发送', 'queue'], ['插话发送', 'steer'], ['中断并发送', 'interrupt'],
+  ] as const)('offers %s explicitly from the running composer', (label, mode) => {
+    const { view, sink, stop } = bench({ running: true, draft: '纠正消息' })
+    fireEvent.click(view.getByRole('button', { name: '消息发送方式' }))
+    expect(view.getByText('已产生的更改会保留')).toBeTruthy()
+    fireEvent.click(view.getByRole('menuitem', { name: label }))
+    expect(sink).toHaveBeenCalledExactlyOnceWith('纠正消息', [], mode, expect.any(AbortSignal))
+    expect(stop).not.toHaveBeenCalled()
+    expect(view.queryByRole('menu')).toBeNull()
+  })
+
+  it('omits the delivery menu for idle drafts, commands, and child sessions', () => {
+    for (const options of [
+      { draft: 'idle message' },
+      { running: true, draft: '/goal inspect' },
+      { running: true, draft: 'child message', subagent: CONTINUABLE_CHILD },
+    ]) {
+      const { view } = bench(options)
+      expect(view.queryByRole('button', { name: '消息发送方式' })).toBeNull()
+      view.unmount()
+    }
+  })
+
+  it('holds the correction draft until admission and retains it on save failure', async () => {
+    const { view, shell, sink, textarea } = bench({ running: true, draft: '需要保存的纠正消息' })
+    const save = Promise.withResolvers<SubmitOutcome>()
+    sink.mockReturnValueOnce(save.promise)
+    fireEvent.click(view.getByRole('button', { name: '消息发送方式' }))
+    fireEvent.click(view.getByRole('menuitem', { name: '中断并发送' }))
+    expect(view.getByRole('status').textContent).toBe('正在保存纠正消息…')
+    expect(shell.snapshot.draft).toBe('需要保存的纠正消息')
+    expect(textarea.getAttribute('contenteditable')).toBe('false')
+    await act(async () => { save.resolve({ kind: 'error' }) })
+    expect(view.queryByRole('status')).toBeNull()
+    expect(shell.snapshot.draft).toBe('需要保存的纠正消息')
+    expect(textarea.getAttribute('contenteditable')).toBe('true')
   })
 
   it('running Send relabels when the busy-state preference changes live', () => {

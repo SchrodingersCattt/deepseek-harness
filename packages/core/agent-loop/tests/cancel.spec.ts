@@ -8,7 +8,7 @@ import { ToolCallId, createUserMessage, expandAssistantStream } from '@deepseek-
  * @module dsh-agent-loop/tests/cancel
  */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, onTestFinished } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId, SessionLogOffset, TurnEndReason } from '@deepseek-ai/dsh-session'
@@ -58,6 +58,68 @@ function userTexts(agent: Agent): string[] {
 }
 
 describe('Agent.cancel()', () => {
+  it('lets the active turn finish naturally during a save without letting the queued turn overtake the correction', async () => {
+    const adapter = new MockAdapter([textResponse('first'), textResponse('correction'), textResponse('queue')])
+    const ctx = await harness(adapter)
+    const agent = await ctx.agentLoop.create(SessionId('interrupt-between-turns'), { provider: 'mock', model: 'mock' })
+    const stopping = Promise.withResolvers<undefined>()
+    const allowTurnEnd = Promise.withResolvers<undefined>()
+    const firstEnd = Promise.withResolvers<undefined>()
+    const allowSave = Promise.withResolvers<undefined>()
+    onTestFinished(async () => {
+      allowTurnEnd.resolve(undefined)
+      allowSave.resolve(undefined)
+      await ctx.fiber.dispose()
+    })
+    ctx.on('agent/turn-stopping', async ({ turn }) => {
+      if (turn === 1) {
+        stopping.resolve(undefined)
+        await allowTurnEnd.promise
+      }
+      return undefined
+    })
+    ctx.on('session/event', (_session, event) => {
+      if (event.type === 'turn/end' && event.data.turn === 1) firstEnd.resolve(undefined)
+    })
+    ctx.on('session/flush', () => allowSave.promise)
+
+    send(agent, 'first')
+    await stopping.promise
+    send(agent, 'queued')
+    const correction = createUserMessage({ content: [{ type: 'text', text: 'corrected' }], source: { kind: 'user' } })
+    const submitted = agent.interruptAndSend?.(correction)
+    allowTurnEnd.resolve(undefined)
+    await firstEnd.promise
+    expect(adapter.requests).toHaveLength(1)
+    allowSave.resolve(undefined)
+    await expect(submitted).resolves.toEqual({ kind: 'accepted' })
+    await agent.whenIdle()
+
+    expect(userTexts(agent)).toEqual(['first', 'corrected', 'queued'])
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'turn/end').map(event => event.data.reason.kind))
+      .toEqual(['completed', 'completed', 'completed'])
+  })
+
+  it('retracts a correction whose save fails and leaves the active turn running', async () => {
+    const adapter = new MockAdapter(['hang'])
+    const ctx = await harness(adapter)
+    onTestFinished(() => ctx.fiber.dispose())
+    const agent = await ctx.agentLoop.create(SessionId('interrupt-save-failed'), { provider: 'mock', model: 'mock' })
+    const streaming = Promise.withResolvers<undefined>()
+    ctx.on('llm/stream', (_options, next) => { streaming.resolve(undefined); return next() })
+    const cause = new Error('storage unavailable')
+    ctx.on('session/flush', () => { throw cause })
+    send(agent, 'active')
+    await streaming.promise
+    send(agent, 'older queue item')
+
+    const correction = createUserMessage({ content: [{ type: 'text', text: 'retryable draft' }], source: { kind: 'user' } })
+    await expect(agent.interruptAndSend?.(correction)).resolves.toEqual({ kind: 'save-failed', cause })
+    expect(adapter.requests[0]?.signal?.aborted).toBe(false)
+    expect(agent.inbox.nextTurn).toMatchObject([{ content: [{ type: 'text', text: 'older queue item' }] }])
+    expect(userTexts(agent)).toEqual(['active'])
+  })
+
   /**
    * Cancel one turn, let `mutate` alter the caller's cause the way a transport
    * does once it observes the abort, then report every recorded turn ending.

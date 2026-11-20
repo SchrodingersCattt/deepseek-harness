@@ -16,6 +16,7 @@ import type {
   SessionAddress,
   SessionAssistantStreamBaseline,
   SessionProjectionBaseline,
+  SessionPromptRequest,
   SessionRequestId,
 } from '../../types.ts'
 import type {
@@ -129,6 +130,7 @@ export class Session implements SessionFace {
   private lastAgentError: string | null = null
   /** Local submission echoes, insertion-ordered (see SessionSnapshot.pendingSubmissions). */
   private pendingSubmissions: readonly PendingSubmission[] = []
+  private interruptRequestId: SessionRequestId | undefined
   /** Per-echo settlement state; `retiring` latches the first observation so a
    *  Inbox projection and its durable event cannot both retire one echo. */
   private readonly submissionSettlements = new Map<SessionRequestId, {
@@ -244,16 +246,16 @@ export class Session implements SessionFace {
   }
 
   /**
-   * Send (queue/steer passed through 1:1); failures land in the snapshot's promptError.
+   * Send a prompt and mirror failures into the snapshot's promptError.
    * @param content - text, browser-owned temporary image uploads, and staged-file receipts.
-   * @param mode - queue appends after the current turn; steer interrupts it.
+   * @param mode - queue a turn, steer at the next step, or save a correction and interrupt.
    * @param signal - optional caller cancellation for the complete admission round-trip.
    * @param requestId - identity from {@link beginSubmission}; a failed identified prompt retires its echo.
    * @returns the prompt result (also mirrored into promptError on failure).
    */
   async prompt(
     content: PromptContentPart[],
-    mode: 'queue' | 'steer',
+    mode: SessionPromptRequest['mode'],
     signal?: AbortSignal,
     requestId?: SessionRequestId,
   ): Promise<RemoteResult<{ accepted: true }>> {
@@ -268,13 +270,23 @@ export class Session implements SessionFace {
     let result: RemoteResult<{ accepted: true }>
     if (this.address === undefined) {
       const clientTimeZone = resolvedClientTimeZone()
+      const resolvedRequestId = requestId ?? randomUUID() as SessionRequestId
       result = await this.remote.session.prompt({
-        requestId: requestId ?? randomUUID() as SessionRequestId,
+        requestId: resolvedRequestId,
         sessionId: this.sessionId,
         mode,
         content,
         clientTimeZone,
       }, signal)
+      if (mode === 'interrupt' && result.ok) {
+        this.interruptRequestId = resolvedRequestId
+        this.notifier.markDirty()
+      }
+    } else if (mode === 'interrupt') {
+      result = {
+        ok: false,
+        error: new RemoteError('session/interrupt-unavailable', 'Interrupt and send is available for ordinary sessions.', {}),
+      }
     } else if (content.some(part => part.type === 'file')) {
       result = {
         ok: false,
@@ -890,6 +902,7 @@ export class Session implements SessionFace {
     return {
       sessionId: this.sessionId,
       pendingSubmissions: this.pendingSubmissions,
+      ...(this.interruptRequestId === undefined ? {} : { interruptRequestId: this.interruptRequestId }),
       running: this.running,
       subagent: this.address === undefined
         ? null

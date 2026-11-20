@@ -1,0 +1,5 @@
+- menu:
+  - menuitem "Queue message"
+  - menuitem "Steer message"
+  - menuitem "Interrupt and send"
+  - text: Changes already made will remain.

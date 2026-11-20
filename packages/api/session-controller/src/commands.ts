@@ -86,6 +86,9 @@ function latestCompletedPrefixBoundary(events: readonly SessionEvent[]): Session
 
 /** Implements Session business commands delegated by the Session Controller Remote service. */
 export class SessionCommandController {
+  /** Keep in-flight and accepted corrections addressable while their Agent is attached. */
+  private readonly corrections = new WeakMap<Agent, Map<SessionRequestId, Promise<SessionPromptValue>>>()
+
   /**
    * @param ctx - Host context carrying Agent, model, attachment, title, and Workspace services.
    * @param agents - sole owner of create, resume, and Session-local model selection.
@@ -327,6 +330,9 @@ export class SessionCommandController {
       )
     }
     const agent = await this.resolveAgent(request.sessionId)
+    let corrections = this.corrections.get(agent)
+    const correction = corrections?.get(request.requestId)
+    if (correction !== undefined) return correction
     if (hasPromptRequest(agent, request.requestId)) return { accepted: true }
     const source: MessageSource = {
       kind: 'user',
@@ -352,6 +358,7 @@ export class SessionCommandController {
           receiptId => this.ctx.fileUploads.resolve(agent, receiptId),
         )
         const content = await this.ctx.attachments.admitPromptContent(admission.content)
+        if (hasPromptRequest(agent, request.requestId)) return { accepted: true }
         const message: UserMessage = createUserMessage({ content, source })
         if (this.ctx.agents.get(agent.id) !== agent) {
           throw new RemoteError(
@@ -361,7 +368,24 @@ export class SessionCommandController {
           )
         }
         using binding = this.ctx.fileUploads.bindPrompt(agent, admission.receiptIds, request.requestId)
-        if (request.mode === 'steer') agent.steer(message)
+        if (request.mode === 'interrupt') {
+          const result = await agent.interruptAndSend?.(message)
+          if (result === undefined) {
+            throw new RemoteError('session/interrupt-unavailable', 'This session driver does not support interrupt and send.', {})
+          }
+          switch (result.kind) {
+            case 'accepted':
+              break
+            case 'busy':
+              throw new RemoteError('session/interrupt-busy', 'An earlier correction is waiting to run.', {})
+            case 'save-failed':
+              this.ctx.logger.warn(`session ${agent.id}: correction save failed: ${String(result.cause)}`)
+              throw new RemoteError('session/interrupt-save-failed', 'Could not save the correction.', {})
+            /* v8 ignore next 2 -- closed-union exhaustiveness guard */
+            default:
+              assertNever(result)
+          }
+        } else if (request.mode === 'steer') agent.steer(message)
         else agent.followup(message)
         binding.commit()
       } catch (error) {
@@ -373,7 +397,19 @@ export class SessionCommandController {
       }
       return { accepted: true }
     }
-    return hasImage ? this.agents.serializeImageAdmission(agent, admit) : admit()
+    const operation = hasImage ? this.agents.serializeImageAdmission(agent, admit) : admit()
+    if (request.mode !== 'interrupt') return operation
+    if (corrections === undefined) {
+      corrections = new Map()
+      this.corrections.set(agent, corrections)
+    }
+    corrections.set(request.requestId, operation)
+    try {
+      return await operation
+    } catch (error: unknown) {
+      corrections.delete(request.requestId)
+      throw error
+    }
   }
 
   private async requireModel(selection: Pick<AgentModelSelection, 'provider' | 'model'>): Promise<void> {

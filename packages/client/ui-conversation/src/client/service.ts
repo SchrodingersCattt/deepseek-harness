@@ -222,7 +222,7 @@ export class ConversationController extends Service implements IConversation {
    * @param session - target session.
    * @param text - serialized prompt text.
    * @param attachmentIds - ordered draft-local attachment ids.
-   * @param mode - queue or steer delivery selected by composer policy.
+   * @param mode - delivery selected by the composer or its message delivery menu.
    * @param signal - optional cancellation for the complete Host admission.
    * @returns the Host admission outcome; local attachment preparation failures reject.
    */
@@ -277,7 +277,7 @@ export class ConversationController extends Service implements IConversation {
       text,
       attachments: pendingAttachments,
       onRetire: (settlement) => {
-        this.settleSubmittedAttachments(session.sessionId, attachments, settlement)
+        if (mode !== 'interrupt') this.settleSubmittedAttachments(session.sessionId, attachments, settlement)
         finishRetirement?.(settlement)
       },
     })
@@ -292,7 +292,12 @@ export class ConversationController extends Service implements IConversation {
     }
     const result = await session.prompt(content, mode, signal, submission.requestId)
     if (!result.ok) return { kind: 'error' }
-    if (retirement !== undefined && (await retirement).reason !== 'observed') return { kind: 'error' }
+    if (retirement !== undefined) {
+      const settlement = await retirement
+      if (settlement.reason !== 'observed') return { kind: 'error' }
+      // The provisional Inbox entry can appear before the correction is saved.
+      if (mode === 'interrupt') this.settleSubmittedAttachments(session.sessionId, attachments, settlement)
+    }
     return { kind: 'success' }
   }
 

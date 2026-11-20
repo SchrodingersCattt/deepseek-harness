@@ -3,9 +3,8 @@
  * Events in, effects out; zero React / DOM / cordis. Package-private; the
  * SessionInput shell owns editor state and executes the returned effects.
  *
- * Claimed commands occupy the frozen in-flight slot. Ordinary messages detach
- * at Enter, so the editor can clear immediately and accept another message
- * while earlier admissions remain in flight.
+ * Claimed commands and corrections hold the draft until admission settles.
+ * Queue and Steer detach so the editor can accept another message immediately.
  */
 import type { InputSubmitMode, MessageSubmission } from '../contract/composer-submission.ts'
 import type { CommandClaim, InputEffect, InputEvent, InputState, SubmitAttempt } from '../contract/input.ts'
@@ -144,6 +143,12 @@ export class SubmitMachine {
 
   private onEnter(mode: InputSubmitMode, draft: string, submission?: MessageSubmission): readonly InputEffect[] {
     if (this.phase === 'adjudicating' || this.phase === 'submitting') return []
+    if (mode === 'interrupt') {
+      if (this.phase !== 'plain' || draft.trimStart().startsWith('/')) return []
+      const attempt = this.beginAttempt(mode, draft, submission)
+      this.phase = 'submitting'
+      return [{ type: 'default-sink', attempt, draft, mode }]
+    }
     if (this.phase === 'claimed' && this.claim !== undefined) {
       const attempt = this.beginAttempt(mode, draft, submission)
       this.phase = 'submitting'
@@ -214,12 +219,19 @@ export class SubmitMachine {
     return text === undefined ? [] : [{ type: 'notice', level: 'error', text }]
   }
 
-  /** Settle one ordinary send independently of current phase and other detached sends. */
+  /** Settle one ordinary or correction send against its original attempt. */
   private onSinkSettled(ev: Extract<InputEvent, { type: 'sink-settled' }>): readonly InputEffect[] {
-    if (!this.detached.delete(ev.attempt.seq)) return []
+    const frozen = this.inflight?.attempt === ev.attempt
+    if (!frozen && !this.detached.delete(ev.attempt.seq)) return []
+    const effects: InputEffect[] = []
+    if (frozen) {
+      this.inflight = undefined
+      this.phase = 'plain'
+      if (ev.ok) effects.push({ type: 'commit-draft', retainSuffixOf: ev.attempt.draftSnapshot })
+    }
     const text = ev.message ?? ev.outcome?.text
-    if (text === undefined) return []
-    return [{ type: 'notice', level: ev.ok && ev.outcome?.kind !== 'error' ? 'info' : 'error', text }]
+    if (text !== undefined) effects.push({ type: 'notice', level: ev.ok && ev.outcome?.kind !== 'error' ? 'info' : 'error', text })
+    return effects
   }
 
   /** Clear after an accepted attachment-only send; it has no text suffix to retain. */

@@ -214,6 +214,9 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'session/projections-unavailable': Record<string, never>
     'session/writer-held': { readonly sessionId: SessionId }
     'session/agent-busy': { readonly reason: string }
+    'session/interrupt-busy': Record<string, never>
+    'session/interrupt-save-failed': Record<string, never>
+    'session/interrupt-unavailable': Record<string, never>
     'session/invalid-time-zone': { readonly value: string }
     'session/workspace-attach-failed': { readonly sessionId: SessionId; readonly workspaceId: string }
     'agent-preset/conflict': {
@@ -339,7 +342,7 @@ export interface SessionPromptRequest {
   /** Client-minted identity persisted on the exact accepted user message. */
   readonly requestId: SessionRequestId
   readonly sessionId: SessionId
-  readonly mode: 'queue' | 'steer'
+  readonly mode: 'queue' | 'steer' | 'interrupt'
   /** At least one non-whitespace text part or attachment. */
   readonly content: readonly PromptContentPart[]
   readonly clientTimeZone?: string

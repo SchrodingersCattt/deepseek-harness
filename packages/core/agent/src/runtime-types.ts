@@ -44,6 +44,12 @@ export interface CancelOptions {
   keepInbox?: boolean | undefined
 }
 
+/** Admission result for a correction that requests cancellation of the active turn. */
+export type InterruptAndSendResult =
+  | { readonly kind: 'accepted' }
+  | { readonly kind: 'busy' }
+  | { readonly kind: 'save-failed'; readonly cause: unknown }
+
 /** Agent-owned access to pending work; concrete storage belongs to the driver. */
 export interface Inbox {
   /** Prompts awaiting individual turns. */
@@ -220,6 +226,17 @@ declare module './types.ts' {
    * @param message - identified prompt content and the source that supplied it.
    */
     followup(message: UserMessage): void
+
+    /**
+     * Save a correction at the head of the next-turn inbox before cancelling
+     * the current turn. The driver starts the correction after the old turn
+     * settles. An idle agent starts the correction once it is saved. Drivers
+     * that cannot provide durable interruption omit this method.
+     * @param message - identified, validated user input for the replacement turn.
+     * @returns accepted after saving and scheduling, busy while another correction
+     * awaits delivery, or save-failed when the save could not be confirmed.
+     */
+    interruptAndSend?(message: UserMessage): Promise<InterruptAndSendResult>
 
     /**
    * Submit steering for the nearest step. An idle driver starts a turn;

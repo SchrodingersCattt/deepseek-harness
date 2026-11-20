@@ -15,9 +15,10 @@
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, KeyboardEvent, MouseEvent } from 'react'
+import type { InboxState } from '@deepseek-ai/dsh-agent/types'
 import clsx from 'clsx'
 import {
-  IconPlusOutlineMedium, IconWarningOutlineRegular, Toast, Tooltip,
+  IconChevronUpOutlineRegular, IconPlusOutlineMedium, IconWarningOutlineRegular, Menu, Toast, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 // Type-only: the `plan` projection key merge (the TodoDock posture — the
 // composer reads a host-computed value; the domain owns the key).
@@ -59,9 +60,16 @@ export const InputBar = memo(function InputBar({
   void useLexicon // hook seat stays bound by the inject compartment; text-ref decoration rides the shell's editor transforms
   const commandMenuOpen = useMenuLauncher(source => source === 'command')
   const [activity, setActivity] = useState(false)
-  useEffect(() => { setActivity(false) }, [sessionId])
+  const [deliveryOpen, setDeliveryOpen] = useState(false)
+  useEffect(() => { setActivity(false); setDeliveryOpen(false) }, [sessionId])
   const promptError = useSession(s => s.promptError) ?? null
   const running = useSession(s => s.running) ?? false
+  const interruptRequestId = useSession(s => s.interruptRequestId)
+  const stoppingForCorrection = useProjection('inbox', (value) => {
+    const inbox = value as InboxState | undefined
+    return interruptRequestId !== undefined && inbox?.['next-turn'].some(({ source }) =>
+      source.kind === 'user' && 'rpcId' in source && source.rpcId === interruptRequestId) === true
+  })
   const subagent = useSession(s => s.subagent) ?? null
   const removed = useSession(s => s.removed) ?? false
   // Plan mode swaps the composer placeholder (the projection is the folded
@@ -113,6 +121,14 @@ export const InputBar = memo(function InputBar({
       showToast(t('error.sessionInUse'))
       return
     }
+    if (error.code === 'session/interrupt-busy' || error.code === 'session/interrupt-save-failed') {
+      showToast(t(error.code === 'session/interrupt-busy' ? 'input.interrupt.busy' : 'input.interrupt.saveFailed'))
+      return
+    }
+    if (error.code === 'session/interrupt-unavailable') {
+      showToast(t('input.interrupt.unavailable'))
+      return
+    }
     showToast(error.code === 'session/attachment-invalid' || error.code === 'subagent/attachment-invalid'
       ? attachmentErrorText(t, error.details.reason, imageLimits)
       : `${error.message} (${error.code})`)
@@ -145,6 +161,7 @@ export const InputBar = memo(function InputBar({
   // be disabled do lock it — there is no session to choose a model for.
   const modelSeatLocked = removed || inert || !live
   const machineBusy = input?.phase === 'adjudicating' || input?.phase === 'submitting'
+  const savingCorrection = input?.phase === 'submitting' && input.claim === undefined
   // The no-workspace surface remains the resident DOM node but acts as the
   // existing picker trigger. Message controls stay locked until a Session
   // exists; the trigger itself is read-only rather than disabled so pointer
@@ -326,6 +343,8 @@ export const InputBar = memo(function InputBar({
   const interruptible = running && continuable
   const primarySubmitMode = resolveSubmitMode(busyEnter, running, 'enter', steeringAvailable)
   const plainMessageDraft = !empty && input?.phase === 'plain' && !draft.trimStart().startsWith('/')
+  const canChooseDelivery = running && subagent === null && !primaryDisabled && plainMessageDraft && !activity && !commandMenuOpen
+  useEffect(() => { if (!canChooseDelivery) setDeliveryOpen(false) }, [canChooseDelivery])
   const primaryLabel = primaryStops
     ? t('input.stop')
     : running && steeringAvailable && !disabled && !uploadsPending && plainMessageDraft
@@ -494,6 +513,40 @@ export const InputBar = memo(function InputBar({
                 </button>
               </Tooltip>
             )}
+            {canChooseDelivery && (
+              <Menu
+                open={deliveryOpen}
+                onClose={() => { setDeliveryOpen(false) }}
+                align="end"
+                side="top"
+                portal
+                autoFocus
+                items={[
+                  { id: 'queue', label: t('input.send.queue') },
+                  { id: 'steer', label: t('input.send.steer') },
+                  { id: 'interrupt', label: t('input.send.interrupt') },
+                ]}
+                footer={[{ type: 'label', id: 'effects', text: t('input.interrupt.effects') }]}
+                onSelect={(mode) => {
+                  setDeliveryOpen(false)
+                  if (mode === 'queue' || mode === 'steer' || mode === 'interrupt') keyboard?.submit(mode, 'click')
+                }}
+                anchor={(
+                  <Tooltip label={t('input.send.options')} side="top" delayMs={500} disabled={deliveryOpen}>
+                    <button
+                      type="button"
+                      className={css.add}
+                      aria-label={t('input.send.options')}
+                      aria-haspopup="menu"
+                      aria-expanded={deliveryOpen}
+                      onClick={() => { setDeliveryOpen(open => !open) }}
+                    >
+                      <IconChevronUpOutlineRegular size={14} />
+                    </button>
+                  </Tooltip>
+                )}
+              />
+            )}
             <Tooltip label={primaryStops ? t('input.stop') : primaryLabel} shortcutKeys={primaryStops ? stopKeys : undefined} side="top" delayMs={500} disabled={primaryDisabled}>
               <button
                 type="button"
@@ -518,6 +571,11 @@ export const InputBar = memo(function InputBar({
         </div>
       </div>
       <div className={css.dock} data-composer-dock>
+        {savingCorrection || stoppingForCorrection ? (
+          <span role="status" className={css.interruptStatus}>
+            {t(savingCorrection ? 'input.interrupt.saving' : 'input.interrupt.stopping')}
+          </span>
+        ) : null}
         {variant === 'composer' && input !== undefined && sessionId !== undefined
           ? renderSlot('conversation.composer.dock', {})
           : null}

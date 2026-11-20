@@ -323,7 +323,7 @@ export type InputEvent =
   | { readonly type: 'adjudication-failed'; readonly attempt: SubmitAttempt; readonly message: string }
   /** Settlement carries the live clipboard projection for suffix-retention and claim re-entry decisions. */
   | { readonly type: 'submit-settled'; readonly attempt: SubmitAttempt; readonly ok: boolean; readonly draft: string; readonly outcome?: SubmitOutcome; readonly message?: string }
-  /** Settlement of one optimistic default send, independent of the frozen command slot. */
+  /** Settlement of one ordinary or correction send. */
   | { readonly type: 'sink-settled'; readonly attempt: SubmitAttempt; readonly ok: boolean; readonly outcome?: SubmitOutcome; readonly message?: string }
   /** Commit an attachment-only send whose empty draft did not need an attempt. */
   | { readonly type: 'send-committed' }
@@ -336,7 +336,7 @@ export type InputEvent =
 export type InputEffect =
   | { readonly type: 'adjudicate'; readonly attempt: SubmitAttempt; readonly draft: string }
   | { readonly type: 'begin-submit'; readonly attempt: SubmitAttempt; readonly claim: CommandClaim; readonly args: string }
-  /** Detached default send; the shell captures its editor projection before the following commit effect. */
+  /** Capture the editor projection and submit an ordinary message or correction. */
   | {
     readonly type: 'default-sink'
     readonly attempt: SubmitAttempt

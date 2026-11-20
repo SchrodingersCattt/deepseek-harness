@@ -12,7 +12,7 @@ import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
 import type { SessionId, SessionSeq } from '@deepseek-ai/dsh-session/types'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
-import type { PromptContentPart, QueueAction, SessionRequestId } from '../../types.ts'
+import type { PromptContentPart, QueueAction, SessionPromptRequest, SessionRequestId } from '../../types.ts'
 import type { PendingSubmissionAttachment, SessionSnapshot } from './snapshot.ts'
 
 /**
@@ -31,7 +31,7 @@ export type PendingSubmissionRetirement =
 /** Input registering one local submission echo ahead of its prompt call. */
 export interface BeginSubmissionInput {
   /** Delivery mode used with the upcoming prompt. */
-  readonly mode: 'queue' | 'steer'
+  readonly mode: SessionPromptRequest['mode']
   /** Prompt text exactly as the upcoming prompt will send it. */
   readonly text: string
   /** Ordered image previews and durable file metadata matching the upcoming prompt attachments. */
@@ -79,14 +79,14 @@ export interface ISession {
   /**
    * Send a prompt into the session.
    * @param content - text plus browser-owned temporary image uploads.
-   * @param mode - 'queue' appends a turn; 'steer' interrupts the running one.
+   * @param mode - queue a turn, steer at the next step, or save a correction and interrupt.
    * @param signal - optional caller cancellation for the complete admission round-trip.
    * @param requestId - identity from {@link beginSubmission}; a failed identified prompt retires its echo.
    * @returns acceptance, or the business error (also mirrored into snapshot.promptError).
    */
   prompt(
     content: PromptContentPart[],
-    mode: 'queue' | 'steer',
+    mode: SessionPromptRequest['mode'],
     signal?: AbortSignal,
     requestId?: SessionRequestId,
   ): Promise<RemoteResult<{ accepted: true }>>

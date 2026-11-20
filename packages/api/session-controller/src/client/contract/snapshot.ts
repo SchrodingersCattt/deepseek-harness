@@ -70,6 +70,8 @@ export interface SessionSnapshot {
   readonly sessionId: SessionId
   /** Local prompt-submission echoes not yet observed as durable events or queue occurrences. */
   readonly pendingSubmissions: readonly PendingSubmission[]
+  /** Most recent locally accepted correction, for status while it remains queued. */
+  readonly interruptRequestId?: SessionRequestId
   readonly running: boolean
   readonly subagent: {
     readonly address: SubagentAddress

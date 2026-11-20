@@ -106,6 +106,81 @@ async function until(predicate: () => boolean): Promise<void> {
 }
 
 describe('tool-call scheduler: grouping and barriers', () => {
+  it('saves a correction before canceling and drains the active tool before the replacement turn', async () => {
+    const adapter = new MockAdapter([
+      multiCall([
+        { id: 'finished', name: 'probe', args: { id: 'finished' } },
+        { id: 'active', name: 'probe', args: { id: 'active' } },
+        { id: 'later', name: 'probe', args: { id: 'later' } },
+      ]),
+      textResponse('corrected'),
+      textResponse('queued'),
+    ])
+    const ctx = await harness(adapter)
+    const tool = gatedExclusiveTool('probe')
+    const allowSave = Promise.withResolvers<undefined>()
+    onTestFinished(async () => {
+      allowSave.resolve(undefined)
+      for (const id of tool.pending()) tool.release(id)
+      await ctx.fiber.dispose()
+    })
+    ctx.tools.register(tool.tool)
+    const agent = await ctx.agentLoop.create(SessionId('interrupt-and-send'), { provider: 'mock', model: 'mock' })
+    const interrupt = agent.interruptAndSend?.bind(agent)
+    if (interrupt === undefined) throw new Error('agent loop is missing interrupt delivery')
+    const user = (text: string) => createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
+    const correction = user('use the new input')
+    const queued = user('queued input')
+    const steering = user('earlier steering')
+    const saveStarted = Promise.withResolvers<undefined>()
+    const oldAborted = Promise.withResolvers<undefined>()
+    let saved = false
+    ctx.on('session/flush', async () => {
+      saveStarted.resolve(undefined)
+      await allowSave.promise
+      saved = true
+    })
+    ctx.on('tools/execute', (execution, next) => {
+      execution.signal.addEventListener('abort', () => { oldAborted.resolve(undefined) }, { once: true })
+      return next()
+    })
+
+    agent.followup(user('first input'))
+    await until(() => tool.started.includes('finished'))
+    tool.release('finished')
+    await until(() => tool.started.includes('active'))
+    agent.followup(queued)
+    agent.steer(steering)
+    const admitting = interrupt(correction)
+    await saveStarted.promise
+    expect(agent.inbox.nextTurn.map(message => message.id)).toEqual([correction.id, queued.id])
+    expect(agent.inbox.nextStep.map(message => message.id)).toEqual([steering.id])
+    expect(adapter.requests[0]?.signal?.aborted).toBe(false)
+    await expect(interrupt(user('second correction'))).resolves.toEqual({ kind: 'busy' })
+
+    allowSave.resolve(undefined)
+    await oldAborted.promise
+    expect(saved).toBe(true)
+    await expect(admitting).resolves.toEqual({ kind: 'accepted' })
+    await expect(interrupt(user('another correction'))).resolves.toEqual({ kind: 'busy' })
+    expect(events(agent).filter(event => event.type === 'turn/start')).toHaveLength(1)
+    tool.release('active')
+    await agent.whenIdle()
+
+    expect(tool.started).toEqual(['finished', 'active'])
+    const history = events(agent)
+    expect(history.filter(event => event.type === 'turn/end').map(event => event.data.reason.kind))
+      .toEqual(['aborted', 'completed', 'completed'])
+    const results = history.filter(event => event.type === 'tool/result')
+    expect(results.map(event => [event.data.message.toolCallId, event.data.message.isError]))
+      .toEqual([[ToolCallId('finished'), false], [ToolCallId('active'), true], [ToolCallId('later'), true]])
+    expect(results[2]?.data.error?.code).toBe(TOOL_ABORTED_BEFORE_DISPATCH)
+    expect(history.filter(event => event.type === 'user/message').map(event => event.data.id)).toEqual([
+      expect.any(String), steering.id, correction.id, queued.id,
+    ])
+    expect(adapter.requests[1]?.messages.filter(message => message.id === correction.id)).toEqual([correction])
+  })
+
   it('runs parallel-safe siblings concurrently (all start before any completes)', async () => {
     const adapter = new MockAdapter([
       multiCall([{ id: 'c1', name: 'p', args: { id: '1' } }, { id: 'c2', name: 'p', args: { id: '2' } }, { id: 'c3', name: 'p', args: { id: '3' } }]),
